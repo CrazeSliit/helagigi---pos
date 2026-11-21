@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ───────────── HeladiGi POS design tokens ─────────────
+   Brand primitives live in tailwind.config.ts.
+   Semantic tokens below flip between light and dark.        */
+:root {
+  --bg: 246 248 251;          /* #F6F8FB */
+  --surface: 255 255 255;     /* #FFFFFF */
+  --surface-2: 241 244 249;   /* subtle fills */
+  --border: 227 232 240;      /* #E3E8F0 */
+  --fg: 11 30 79;             /* navy-900 */
+  --fg2: 74 88 117;           /* #4A5875 */
+  --muted: 138 150 173;       /* #8A96AD — placeholders/captions only */
+  --tint: 234 240 251;        /* navy-50 */
+  --orange-tint: 255 240 224; /* orange-100 */
+  /* Text on orange: navy passes AA (6.2:1); white on #FF7A00 is 2.6:1 */
+  --on-accent: 11 30 79;
+  --btn2: 11 30 79;
+  --on-btn2: 255 255 255;
+  color-scheme: light;
+}
+.dark {
+  --bg: 7 20 47;              /* #07142F */
+  --surface: 15 35 80;        /* #0F2350 */
+  --surface-2: 21 43 94;
+  --border: 30 52 102;        /* #1E3466 */
+  --fg: 234 240 251;
+  --fg2: 185 199 226;
+  --muted: 132 150 186;
+  --tint: 26 49 112;          /* navy-700 */
+  --orange-tint: 66 40 18;
+  --on-accent: 11 30 79;
+  --btn2: 234 240 251;
+  --on-btn2: 11 30 79;
+  color-scheme: dark;
+}
+
+@layer base {
+  html { -webkit-font-smoothing: antialiased; }
+  body { @apply bg-bg text-fg font-sans text-sm; }
+  h1, h2, h3, h4 { @apply font-heading font-semibold text-fg; }
+  /* Tabular numerals on every number we print */
+  .num, td, input[inputmode="decimal"], input[inputmode="numeric"] { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+  :focus-visible { outline: 2px solid #FF7A00; outline-offset: 2px; border-radius: 6px; }
+  [lang="si"] body, .lang-si { line-height: 1.6; }
+  ::selection { background: #FFF0E0; color: #0B1E4F; }
+  /* Large arbitrary sizes must not inherit the 20px body line-height */
+  [class*="text-[3"], [class*="text-[4"], [class*="text-[5"], .text-total, .text-2xl { line-height: 1.2; }
+  h1, h2 { line-height: 1.25; }
+  * { scrollbar-width: thin; scrollbar-color: rgb(var(--border)) transparent; }
+}
+
+@layer components {
+  .card { @apply bg-surface border border-line rounded-card shadow-soft; }
+  .card-pad { @apply p-5; }
+  .h-page { @apply font-heading text-xl font-semibold; }
+  .h-section { @apply font-heading text-base font-semibold; }
+  .label { @apply block text-cap font-medium text-fg2 mb-1.5; }
+  .hint { @apply text-cap text-fg2; }
+
+  /* Buttons */
+  .btn { @apply relative inline-flex items-center justify-center gap-2 rounded-ctl font-semibold whitespace-nowrap select-none transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50 overflow-hidden; }
+  .btn-s { @apply h-8 px-3 text-cap; }
+  .btn-m { @apply h-10 px-4 text-sm; }
+  .btn-l { @apply h-12 px-5 text-base; }
+  .btn-pos { @apply h-16 px-6 text-lg rounded-card; }
+  .btn-primary { @apply bg-orange-500 text-on-accent hover:bg-orange-600 active:bg-orange-600 active:scale-[.98]; }
+  .btn-secondary { @apply bg-btn2 text-on-btn2 hover:opacity-90 active:scale-[.98]; }
+  .btn-outline { @apply border border-line bg-surface text-fg hover:bg-tint active:bg-tint; }
+  .btn-ghost { @apply text-fg2 hover:bg-tint hover:text-fg; }
+  .btn-danger { @apply bg-danger text-white hover:bg-red-700; }
+  .btn-danger-outline { @apply border border-danger/40 text-danger bg-surface hover:bg-danger/10; }
+  .icon-btn { @apply inline-flex h-10 w-10 items-center justify-center rounded-ctl text-fg2 hover:bg-tint hover:text-fg transition-colors; }
+
+  /* Inputs */
+  .field { @apply h-11 w-full rounded-ctl border border-line bg-surface px-3 text-sm text-fg placeholder:text-muted outline-none transition focus:border-orange-500 focus:ring-2 focus:ring-orange-500/25 disabled:bg-surface-2 disabled:text-muted; }
+  .field-error { @apply border-danger focus:border-danger focus:ring-danger/20; }
+  .field-wrap { @apply flex h-11 w-full items-center rounded-ctl border border-line bg-surface text-sm transition focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-500/25; }
+  .field-wrap > input { @apply h-full min-w-0 flex-1 bg-transparent px-3 outline-none placeholder:text-muted text-fg; }
+  .addon { @apply flex h-full items-center border-line px-3 text-fg2 text-sm font-medium bg-surface-2; }
+
+  /* Tables */
+  .tbl { @apply w-full text-sm; }
+  .tbl th { @apply h-11 px-4 text-left text-cap font-semibold uppercase tracking-wide text-fg2 bg-surface-2 border-b border-line whitespace-nowrap; }
+  .tbl td { @apply h-14 px-4 border-b border-line text-fg whitespace-nowrap; }
+  .tbl tbody tr { @apply transition-colors hover:bg-tint/60; }
+  .tbl tbody tr.sel { @apply bg-tint; }
+
+  .kbd { @apply inline-flex items-center rounded-md border border-current px-1.5 py-px text-[11px] font-semibold opacity-70; }
+  .divider { @apply border-t border-line; }
+}
+
+@layer utilities {
+  .dark .text-danger { color: #F87171; }
+  .dark .text-success { color: #4ADE80; }
+  .dark .text-info { color: #60A5FA; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { scrollbar-width: none; }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .safe-area { padding-bottom: env(safe-area-inset-bottom); }
+}
+
+@media print {
+  body * { visibility: hidden; }
+  .print-area, .print-area * { visibility: visible; }
+  .print-area { position: absolute; left: 0; top: 0; }
+}

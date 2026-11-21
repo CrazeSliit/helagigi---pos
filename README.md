@@ -1,6 +1,6 @@
-# HeladiGi POS — UI (Next.js)
+# HeladiGi POS (Next.js + Prisma)
 
-High-fidelity, interactive UI for **HeladiGi POS**, a multi-branch point-of-sale and retail management system for Sri Lankan businesses. UI only: every screen runs on realistic sample data in `lib/data.ts`. There is no backend.
+High-fidelity, interactive UI for **HeladiGi POS**, a multi-branch point-of-sale and retail management system for Sri Lankan businesses. The REST API under `/api/v1` is backed by Prisma and Postgres. **The screens still run on the sample data in `lib/data.ts` until they are connected to the API.**
 
 ## Run it
 
@@ -57,3 +57,40 @@ POS keyboard shortcuts: F1 search, F2 customer, F4 hold, F8 discount, F12 pay, E
 - **Logo.** The wordmark in `public/brand/` is cropped from the supplied logo, with the white background made transparent. It has not been redrawn or recoloured. On navy it always sits on a white tile. `scripts/assets.py` shows how the logo crop and the Raksha line art were made from the supplied files.
 - **Product images.** Product images are category-coloured placeholder tiles with icons. Replace them with real photos.
 - **Translations.** The Sinhala and Tamil strings in `lib/i18n.ts` and `lib/data.ts` should be reviewed by a native speaker before release.
+
+## Backend
+
+```bash
+cp .env.example .env   # fill in the values
+npm install            # also generates the Prisma client
+npm run db:deploy      # apply migrations
+npm run db:seed        # roles, branches, catalogue, first Owner (safe to re-run)
+npm run dev
+```
+
+| Path | What |
+|---|---|
+| `prisma/schema.prisma` | Data model |
+| `app/api/v1/[...path]/route.ts` | API entry point |
+| `lib/server/http.ts` | Routing, errors, CSRF check, permission check |
+| `lib/server/auth.ts` | Sessions, PIN, lockout, manager approval |
+| `lib/server/stock.ts` | The only code that changes stock |
+| `lib/server/modules/` | Sales, register, catalogue, inventory, purchasing, customers, reports, admin |
+
+Responses are `{ data }`, or `{ data, meta }` for lists (`?page=&limit=&q=`). Errors are `{ error: { code, message, details } }`. Sign-in sets an httpOnly cookie.
+
+| Area | Endpoints |
+|---|---|
+| Auth | `/auth/login` `pin-users` `pin-login` `logout` `me` `branch` `lock` `unlock` `change-password` `change-pin` `forgot` `reset` |
+| Sales | `/sales` `/sales/sync` `/sales/held` `/sales/:id` `/sales/:id/void` `/sales/:id/returns` `/returns` |
+| Register | `/shifts` `/shifts/current` `/shifts/open` `/shifts/:id/cash` `report` `close` `approve` |
+| Catalogue | `/products` `/products/barcode/:code` `/products/import` `/categories` `/brands` `/units` `/tax-rates` |
+| Inventory | `/inventory` `/inventory/adjust` `movements` `batches` `transfers` `stock-takes` |
+| Purchasing | `/suppliers` `/purchase-orders` `/grns` `/supplier-payments` `/purchase-returns` |
+| Customers | `/customers` `/customers/:id/ledger` `loyalty` `payments` `/customers/credit/aging` `/customer-groups` |
+| Marketing | `/promotions` `/coupons` `/gift-cards` |
+| Insights | `/dashboard` `/reports/:slug` `/reports/:slug/export` |
+| Admin | `/branches` `/terminals` `/staff` `/roles` `/attendance` `/expenses` `/expense-categories` `/settings` `/audit` `/notifications` `/uploads` |
+| Restaurant | `/tables` `/kots` |
+
+Business rules: prices include VAT, and the server recalculates every total. PIN login works only on terminals trusted through a password sign-in.

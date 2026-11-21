@@ -3,3 +3,11 @@ node_modules
 out
 *.tsbuildinfo
 next-env.d.ts
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Prisma client
+lib/generated

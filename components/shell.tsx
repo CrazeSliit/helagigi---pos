@@ -10,14 +10,20 @@ import { cn, rs } from "@/lib/format";
 import { useApp } from "@/lib/store";
 import { NAV, SUBNAV } from "@/lib/nav";
 import { LANGS } from "@/lib/i18n";
-import { branches, customers, notifications, orders, products } from "@/lib/data";
+import { notifications } from "@/lib/data";
+import { api, errText } from "@/lib/api";
+import { canOpen, isEnabled } from "@/lib/features";
+import { branchOf, useSession } from "@/lib/session";
 import { Logo, Icon } from "./brand";
 import { Avatar, Tabs } from "./ui";
 import { Dropdown, MenuItem, Toaster, Tooltip } from "./overlays";
 
+const visibleNav = (perms: string[]) => NAV.map((g) => ({ ...g, items: g.items.filter((i) => canOpen(i.href, perms)) })).filter((g) => g.items.length);
+
 /* ─────────── Sidebar ─────────── */
 export function Sidebar({ mobileOpen, onClose }: { mobileOpen?: boolean; onClose?: () => void }) {
   const { collapsed, setCollapsed, t } = useApp();
+  const { me } = useSession();
   const path = usePathname();
   const c = collapsed && !mobileOpen;
   return (
@@ -38,7 +44,7 @@ export function Sidebar({ mobileOpen, onClose }: { mobileOpen?: boolean; onClose
           {mobileOpen && <button onClick={onClose} className="grid h-10 w-10 place-items-center rounded-ctl hover:bg-white/10" aria-label="Close menu"><X size={20} /></button>}
         </div>
         <nav className="no-scrollbar flex-1 overflow-y-auto px-3 pb-4" aria-label="Main">
-          {NAV.map((g) => (
+          {visibleNav(me.permissions).map((g) => (
             <div key={g.group} className="mt-4">
               {c ? <div className="mx-auto mb-2 h-px w-8 bg-white/15" /> : <p className="mb-1.5 px-3 text-[11px] font-semibold uppercase tracking-[.12em] text-white/50">{t(g.group)}</p>}
               <ul className="space-y-0.5">
@@ -62,15 +68,9 @@ export function Sidebar({ mobileOpen, onClose }: { mobileOpen?: boolean; onClose
           ))}
         </nav>
         <div className="shrink-0 space-y-1 border-t border-white/10 p-3">
-          <Link href="/help" className={cn("flex h-11 items-center gap-3 rounded-ctl text-sm font-medium text-white/75 hover:bg-white/[.07] hover:text-white", c ? "justify-center" : "px-3")}>
-            <LifeBuoy size={20} strokeWidth={1.75} />{!c && t("n.help")}
-          </Link>
-          <Link href="/design-system" className={cn("flex h-11 items-center gap-3 rounded-ctl text-sm font-medium text-white/75 hover:bg-white/[.07] hover:text-white", c ? "justify-center" : "px-3", path === "/design-system" && "bg-navy-700 text-white")}>
-            <Palette size={20} strokeWidth={1.75} />{!c && "Design system"}
-          </Link>
           <div className={cn("flex items-center gap-3 rounded-ctl bg-white/[.06] p-2", c && "justify-center bg-transparent p-0")}>
-            <Avatar name="Craze Weligepola" size={36} color="#FF7A00" />
-            {!c && <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">Craze</p><p className="truncate text-[11px] text-white/60">Owner · Colombo 03</p></div>}
+            <Avatar name={me.name} size={36} color={me.color} />
+            {!c && <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{me.name}</p><p className="truncate text-[11px] text-white/60">{me.role} · {branchOf(me)?.name}</p></div>}
           </div>
           <button onClick={() => setCollapsed(!collapsed)} className="hidden h-10 w-full items-center justify-center gap-2 rounded-ctl text-cap font-medium text-white/60 hover:bg-white/[.07] hover:text-white lg:flex" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
             {collapsed ? <ChevronsRight size={18} /> : <><ChevronsLeft size={18} />Collapse</>}
@@ -83,20 +83,18 @@ export function Sidebar({ mobileOpen, onClose }: { mobileOpen?: boolean; onClose
 
 /* ─────────── Sync pill ─────────── */
 export function SyncPill({ compact }: { compact?: boolean }) {
-  const { sync, setSync, t } = useApp();
+  const { sync, t } = useApp();
   const m = {
     synced: ["bg-success/10 text-success border-success/25", Wifi, t("t.synced")],
     syncing: ["bg-warning/15 text-[#7A5A00] border-warning/40 dark:text-warning", RefreshCw, t("t.syncing")],
     offline: ["bg-danger/10 text-danger border-danger/30", WifiOff, t("t.offline")],
   }[sync] as [string, typeof Wifi, string];
-  const next = { synced: "syncing", syncing: "offline", offline: "synced" } as const;
   const SI = m[1];
   return (
-    <button onClick={() => setSync(next[sync])} title="Sync status (click to preview states)"
-      className={cn("inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-cap font-semibold transition", m[0])}>
+    <span role="status" className={cn("inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-cap font-semibold", m[0])}>
       <SI size={14} className={sync === "syncing" ? "animate-spin" : ""} />
       <span className={cn(compact && "hidden xl:inline")}>{m[2]}</span>
-    </button>
+    </span>
   );
 }
 
@@ -134,11 +132,23 @@ function titleFor(path: string, t: (k: string) => string) {
 }
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {
-  const { t, branch, setBranch, setPaletteOpen, setNotifOpen } = useApp();
+  const { t, setPaletteOpen, toast } = useApp();
+  const { me } = useSession();
   const path = usePathname();
-  const router = useRouter();
   const tt = titleFor(path, t);
-  const unread = notifications.filter((n) => n.unread).length;
+  const switchBranch = async (branchId: string, close: () => void) => {
+    close();
+    if (branchId === me.branchId) return;
+    try { await api("/auth/branch", { body: { branchId } }); window.location.reload(); }
+    catch (e) { toast({ tone: "error", title: "Couldn't switch branch", body: errText(e) }); }
+  };
+  const logout = async (to: string) => {
+    try { await api("/auth/logout", { body: {} }); } finally { window.location.assign(to); }
+  };
+  const lock = async () => {
+    try { await api("/auth/lock", { body: {} }); window.location.assign("/lock"); }
+    catch (e) { toast({ tone: "error", title: "Couldn't lock", body: errText(e) }); }
+  };
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-2 border-b border-line bg-surface/95 px-3 backdrop-blur sm:gap-3 sm:px-6">
       <button className="icon-btn lg:hidden" onClick={onMenu} aria-label="Open menu"><Menu size={22} /></button>
@@ -147,50 +157,44 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         <p className="truncate font-heading text-base font-semibold">{tt.title}</p>
       </div>
       <button onClick={() => setPaletteOpen(true)} className="hidden h-10 flex-1 items-center gap-2 rounded-ctl border border-line bg-surface-2 px-3 text-left text-sm text-muted transition hover:border-orange-500/50 md:flex md:max-w-md">
-        <Search size={18} className="text-fg2" /><span className="flex-1 truncate">{t("t.search")}</span><span className="kbd text-fg2">Ctrl K</span>
+        <Search size={18} className="text-fg2" /><span className="flex-1 truncate">Go to a page…</span><span className="kbd text-fg2">Ctrl K</span>
       </button>
       <div className="ml-auto flex items-center gap-1 sm:gap-2">
         <button onClick={() => setPaletteOpen(true)} className="icon-btn md:hidden" aria-label="Search"><Search size={20} /></button>
-        <Dropdown align="right" width="w-64" trigger={(o) => (
-          <button className="hidden h-9 items-center gap-2 whitespace-nowrap rounded-ctl border border-line px-3 text-sm font-semibold hover:bg-tint sm:inline-flex">
-            <Store size={16} className="text-fg2" />{branch}<ChevronDown size={15} className={cn("transition", o && "rotate-180")} />
-          </button>
-        )}>
-          {(close) => (
-            <>
-              <p className="px-2.5 pb-1 pt-1.5 text-cap font-semibold uppercase tracking-wide text-fg2">Switch branch</p>
-              {["All branches", ...branches.map((b) => b.name)].map((b) => (
-                <MenuItem key={b} onClick={() => { setBranch(b); close(); }}>
-                  <span className="flex items-center justify-between">{b}{branch === b && <Check size={16} className="text-orange-500" />}</span>
-                </MenuItem>
-              ))}
-            </>
-          )}
-        </Dropdown>
+        {me.branches.length > 1 ? (
+          <Dropdown align="right" width="w-64" trigger={(o) => (
+            <button className="hidden h-9 items-center gap-2 whitespace-nowrap rounded-ctl border border-line px-3 text-sm font-semibold hover:bg-tint sm:inline-flex">
+              <Store size={16} className="text-fg2" />{branchOf(me)?.name}<ChevronDown size={15} className={cn("transition", o && "rotate-180")} />
+            </button>
+          )}>
+            {(close) => (
+              <>
+                <p className="px-2.5 pb-1 pt-1.5 text-cap font-semibold uppercase tracking-wide text-fg2">Switch branch</p>
+                {me.branches.map((b) => (
+                  <MenuItem key={b.id} onClick={() => void switchBranch(b.id, close)}>
+                    <span className="flex items-center justify-between">{b.name}{me.branchId === b.id && <Check size={16} className="text-orange-500" />}</span>
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </Dropdown>
+        ) : <span className="hidden items-center gap-2 px-2 text-sm font-semibold sm:inline-flex"><Store size={16} className="text-fg2" />{branchOf(me)?.name}</span>}
         <span className="hidden md:inline-flex"><SyncPill compact /></span>
-        <button onClick={() => setNotifOpen(true)} className="icon-btn relative" aria-label={`Notifications, ${unread} unread`}>
-          <Bell size={20} /><span className="absolute right-1.5 top-1.5 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-orange-500 px-1 text-[10px] font-bold text-navy-900">{unread}</span>
-        </button>
         <span className="hidden xl:inline-flex"><LangSwitch /></span>
         <Dropdown align="right" width="w-44" trigger={() => <button className="icon-btn hidden sm:inline-flex xl:hidden" aria-label="Language"><Languages size={20} /></button>}>
           <div className="p-1.5"><LangSwitch /></div>
         </Dropdown>
         <ThemeToggle />
         <Dropdown align="right" width="w-60" trigger={() => (
-          <button className="flex items-center gap-2 rounded-full p-0.5 pr-1 hover:bg-tint" aria-label="User menu"><Avatar name="Craze Weligepola" size={36} color="#FF7A00" /><ChevronDown size={15} className="hidden text-fg2 sm:block" /></button>
+          <button className="flex items-center gap-2 rounded-full p-0.5 pr-1 hover:bg-tint" aria-label="User menu"><Avatar name={me.name} size={36} color={me.color} /><ChevronDown size={15} className="hidden text-fg2 sm:block" /></button>
         )}>
-          {(close) => (
-            <>
-              <div className="flex items-center gap-3 border-b border-line px-2.5 pb-3 pt-2"><Avatar name="Craze Weligepola" size={40} color="#FF7A00" /><div><p className="text-sm font-semibold">Craze Weligepola</p><p className="text-cap text-fg2">Owner · craze@heladigi.lk</p></div></div>
-              <div className="pt-1.5">
-                <div className="px-1.5 pb-2 sm:hidden"><LangSwitch /></div>
-                <MenuItem icon={User} onClick={close}>My profile</MenuItem>
-                <MenuItem icon={Users2} onClick={() => router.push("/login/pin")}>Switch user</MenuItem>
-                <MenuItem icon={Lock} kbd="Ctrl L" onClick={() => router.push("/lock")}>Lock screen</MenuItem>
-                <MenuItem icon={LogOut} danger onClick={() => router.push("/login")}>Log out</MenuItem>
-              </div>
-            </>
-          )}
+          <div className="flex items-center gap-3 border-b border-line px-2.5 pb-3 pt-2"><Avatar name={me.name} size={40} color={me.color} /><div className="min-w-0"><p className="truncate text-sm font-semibold">{me.name}</p><p className="truncate text-cap text-fg2">{me.role}{me.email ? ` · ${me.email}` : ""}</p></div></div>
+          <div className="pt-1.5">
+            <div className="px-1.5 pb-2 sm:hidden"><LangSwitch /></div>
+            <MenuItem icon={Users2} onClick={() => void logout("/login/pin")}>Switch user</MenuItem>
+            <MenuItem icon={Lock} onClick={() => void lock()}>Lock screen</MenuItem>
+            <MenuItem icon={LogOut} danger onClick={() => void logout("/login")}>Log out</MenuItem>
+          </div>
         </Dropdown>
       </div>
     </header>
@@ -200,18 +204,16 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
 /* ─────────── Command palette (Ctrl+K) ─────────── */
 export function CommandPalette() {
   const { paletteOpen, setPaletteOpen, t } = useApp();
+  const { me } = useSession();
   const router = useRouter();
   const [q, setQ] = useState("");
   const [i, setI] = useState(0);
   const groups = useMemo(() => {
     const m = (s: string) => s.toLowerCase().includes(q.toLowerCase());
     return [
-      { g: "Products", icon: Package, items: products.filter((p) => m(p.name) || m(p.barcode)).slice(0, 4).map((p) => ({ label: p.name, meta: rs(p.price), href: "/products/new", ico: p.icon })) },
-      { g: "Orders", icon: ShoppingCart, items: orders.filter((o) => m(o.id) || m(o.customer)).slice(0, 3).map((o) => ({ label: o.id, meta: `${o.customer} · ${rs(o.total)}`, href: "/orders" })) },
-      { g: "Customers", icon: Users, items: customers.filter((c) => m(c.name) || m(c.phone)).slice(0, 3).map((c) => ({ label: c.name, meta: c.phone, href: "/customers/profile" })) },
-      { g: "Go to", icon: Zap, items: NAV.flatMap((n) => n.items).filter((it) => m(t(it.key))).slice(0, 5).map((it) => ({ label: t(it.key), meta: "Page", href: it.href })) },
+      { g: "Go to", icon: Zap, items: visibleNav(me.permissions).flatMap((n) => n.items).filter((it) => m(t(it.key))).map((it) => ({ label: t(it.key), meta: "Page", href: it.href })) },
     ].filter((g) => g.items.length);
-  }, [q, t]);
+  }, [q, t, me.permissions]);
   const flat = groups.flatMap((g) => g.items);
   useEffect(() => { setI(0); }, [q]);
   useEffect(() => { if (!paletteOpen) setQ(""); }, [paletteOpen]);
@@ -224,7 +226,7 @@ export function CommandPalette() {
       <div className="relative w-full max-w-xl overflow-hidden rounded-modal border border-line bg-surface shadow-lift animate-rise">
         <div className="flex items-center gap-3 border-b border-line px-4">
           <Search size={20} className="text-fg2" />
-          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("t.search")}
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Go to a page…"
             onKeyDown={(e) => {
               if (e.key === "Escape") setPaletteOpen(false);
               if (e.key === "ArrowDown") { e.preventDefault(); setI(Math.min(flat.length - 1, i + 1)); }
@@ -313,7 +315,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         <main className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">{children}</main>
       </div>
       <CommandPalette />
-      <NotificationsPanel />
       <Toaster />
     </div>
   );
@@ -322,7 +323,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 /** Module sub-navigation tabs. */
 export function SubNav({ module }: { module: string }) {
   const path = usePathname();
-  const items = SUBNAV[module] ?? [];
+  const { me } = useSession();
+  const items = (SUBNAV[module] ?? []).filter((i) => isEnabled(i.href) && canOpen(i.href, me.permissions));
   const active = [...items].sort((a, b) => b.href.length - a.href.length).find((i) => path === i.href || path.startsWith(i.href + "/"));
   return (
     <nav className="-mt-2 mb-6 flex gap-1 overflow-x-auto border-b border-line no-scrollbar" aria-label="Section">

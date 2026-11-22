@@ -1,44 +1,48 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Delete } from "lucide-react";
 import { cn } from "@/lib/format";
 import { Arcs, Logo, RakshaMask } from "./brand";
 import { LangSwitch } from "./shell";
 
-/** PIN dots + big keypad. Demo PIN is 1234; anything else shakes. */
-export function PinPad({ length = 4, onSuccess, dark, correct = "1234" }: { length?: number; onSuccess: () => void; dark?: boolean; correct?: string }) {
+/** PIN dots + big keypad. The server checks the PIN; 4 to 6 digits, confirmed with OK or Enter. */
+export function PinPad({ onSubmit, dark, min = 4, max = 6 }: { onSubmit: (pin: string) => Promise<boolean>; dark?: boolean; min?: number; max?: number }) {
   const [pin, setPin] = useState("");
   const [err, setErr] = useState(false);
-  useEffect(() => {
-    if (pin.length < length) return;
-    if (pin === correct) { const t = setTimeout(onSuccess, 180); return () => clearTimeout(t); }
+  const [busy, setBusy] = useState(false);
+  const submit = useCallback(async () => {
+    if (busy || pin.length < min) return;
+    setBusy(true);
+    const ok = await onSubmit(pin).catch(() => false);
+    setBusy(false);
+    if (ok) return;
     setErr(true);
-    const t = setTimeout(() => { setErr(false); setPin(""); }, 650);
-    return () => clearTimeout(t);
-  }, [pin, length, correct, onSuccess]);
+    setTimeout(() => { setErr(false); setPin(""); }, 650);
+  }, [busy, pin, min, onSubmit]);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (/^\d$/.test(e.key)) setPin((p) => (p.length < length ? p + e.key : p));
+      if (/^\d$/.test(e.key)) setPin((p) => (p.length < max ? p + e.key : p));
       if (e.key === "Backspace") setPin((p) => p.slice(0, -1));
+      if (e.key === "Enter") { e.preventDefault(); void submit(); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [length]);
-  const key = (k: string) => setPin((p) => (k === "⌫" ? p.slice(0, -1) : p.length < length ? p + k : p));
+  }, [max, submit]);
+  const key = (k: string) => { if (k === "OK") return void submit(); setPin((p) => (k === "⌫" ? p.slice(0, -1) : p.length < max ? p + k : p)); };
   return (
     <div className="w-full max-w-[320px]">
-      <div className={cn("mb-2 flex justify-center gap-4", err && "animate-shake")} aria-live="polite" aria-label={`${pin.length} of ${length} digits entered`}>
-        {Array.from({ length }).map((_, i) => (
+      <div className={cn("mb-2 flex justify-center gap-4", err && "animate-shake")} aria-live="polite" aria-label={`${pin.length} digits entered`}>
+        {Array.from({ length: Math.max(min, Math.min(max, pin.length + (pin.length < max ? 1 : 0))) }).map((_, i) => (
           <span key={i} className={cn("h-4 w-4 rounded-full border-2 transition",
             err ? "border-danger bg-danger" : i < pin.length ? "border-orange-500 bg-orange-500 scale-110" : dark ? "border-white/40" : "border-line")} />
         ))}
       </div>
-      <p className={cn("mb-6 h-5 text-center text-cap font-medium", err ? "text-danger" : dark ? "text-white/60" : "text-fg2")}>{err ? "Incorrect PIN — try again" : "Demo PIN: 1234"}</p>
+      <p className={cn("mb-6 h-5 text-center text-cap font-medium", err ? "text-danger" : dark ? "text-white/60" : "text-fg2")}>{err ? "Incorrect PIN, or account locked" : busy ? "Checking…" : "Enter PIN, then OK"}</p>
       <div className="grid grid-cols-3 gap-3">
-        {["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "⌫"].map((k, i) => (
-          <button key={i} disabled={!k} onClick={() => key(k)} aria-label={k === "⌫" ? "Delete" : k}
-            className={cn("grid h-[72px] place-items-center rounded-card font-heading text-2xl font-semibold transition active:scale-95 disabled:invisible",
-              dark ? "bg-white/10 text-white hover:bg-white/20" : "border border-line bg-surface text-fg shadow-soft hover:bg-tint")}>
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "OK"].map((k) => (
+          <button key={k} type="button" disabled={busy || (k === "OK" && pin.length < min)} onClick={() => key(k)} aria-label={k === "⌫" ? "Delete" : k === "OK" ? "Confirm PIN" : k}
+            className={cn("grid h-[72px] place-items-center rounded-card font-heading text-2xl font-semibold transition active:scale-95 disabled:opacity-40",
+              k === "OK" ? "bg-orange-500 text-navy-900 hover:bg-orange-600" : dark ? "bg-white/10 text-white hover:bg-white/20" : "border border-line bg-surface text-fg shadow-soft hover:bg-tint")}>
             {k === "⌫" ? <Delete size={26} /> : k}
           </button>
         ))}
@@ -66,7 +70,7 @@ export function AuthSplit({ children, side }: { children: ReactNode; side?: Reac
               <p className="mt-4 text-base text-white/75">Fast checkout, multi-branch stock and real-time reports — in English, සිංහල and தமிழ்.</p>
               <div className="mt-8 flex gap-6 text-sm text-white/80">
                 <span><b className="block font-heading text-2xl text-orange-500">3 taps</b>to complete a sale</span>
-                <span><b className="block font-heading text-2xl text-sky-300">Offline</b>sales keep working</span>
+                <span><b className="block font-heading text-2xl text-sky-300">Multi-branch</b>stock and sales</span>
               </div>
             </div>
           )}

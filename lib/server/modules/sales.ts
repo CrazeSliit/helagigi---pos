@@ -126,6 +126,57 @@ async function refreshTier(t: Tx, customerId: string) {
   if (rank[earned] > rank[tier]) await t.customer.update({ where: { id: customerId }, data: { tier: earned } });
 }
 
+/** The single source of cart pricing, shared by the live quote and the real sale. */
+async function priceCart(t: Tx, input: Pick<SaleInput, "cartDiscount" | "couponCode">, lines: Line[], branchId: string, at: Date, consumeCoupon: boolean) {
+  await applyPromotions(t, lines, branchId, at);
+  const afterLine = lines.map((l) => l.gross.minus(Prisma.Decimal.max(l.manual, l.promo)));
+  const subtotal = afterLine.reduce((s, v) => s.plus(v), ZERO);
+
+  let cartOff = ZERO;
+  if (input.cartDiscount) cartOff = input.cartDiscount.type === "PERCENT" ? money(subtotal.times(input.cartDiscount.value).div(100)) : money(input.cartDiscount.value);
+
+  let couponId: string | undefined, couponOff = ZERO;
+  if (input.couponCode) {
+    const c = await t.coupon.findUnique({ where: { code: input.couponCode.toUpperCase() } });
+    if (!c || !c.active || (c.startsAt && c.startsAt > at) || (c.endsAt && c.endsAt < at)) throw conflict("Coupon is not valid");
+    if (subtotal.lt(c.minSpend)) throw conflict(`Coupon needs a minimum spend of Rs. ${c.minSpend.toFixed(2)}`);
+    if (c.usageLimit != null && c.used >= c.usageLimit) throw conflict("Coupon has reached its usage limit");
+    if (consumeCoupon) {
+      const where = { id: c.id, ...(c.usageLimit != null ? { used: { lt: c.usageLimit } } : {}) };
+      const { count } = await t.coupon.updateMany({ where, data: { used: { increment: 1 } } });
+      if (!count) throw conflict("Coupon has reached its usage limit");
+    }
+    couponId = c.id;
+    couponOff = c.type === "PERCENT" ? money(subtotal.times(c.value).div(100)) : c.value;
+    if (c.maxDiscount && couponOff.gt(c.maxDiscount)) couponOff = c.maxDiscount;
+  }
+  const cartTotalOff = Prisma.Decimal.min(subtotal, cartOff.plus(couponOff));
+  return { afterLine, subtotal, cartOff, couponId, cartTotalOff, total: money(subtotal.minus(cartTotalOff)) };
+}
+
+const quoteSchema = saleSchema.pick({ items: true, couponCode: true, cartDiscount: true });
+
+async function quoteSale(a: Auth, input: z.infer<typeof quoteSchema>) {
+  const branchId = requireBranch(a);
+  const ids = [...new Set(input.items.map((i) => i.productId))];
+  const products = await db.product.findMany({ where: { id: { in: ids }, active: true }, include: { taxRate: true } });
+  const byId = new Map(products.map((p) => [p.id, p]));
+  if (ids.some((id) => !byId.has(id))) throw badRequest("Some products are unavailable");
+  const lines: Line[] = input.items.map((i) => {
+    const p = byId.get(i.productId)!, qty = qty3(i.quantity), price = p.price, gross = money(qty.times(price));
+    return { productId: p.id, categoryId: p.categoryId, qty, price, gross, manual: money(gross.times(i.discountPct ?? 0).div(100)), promo: ZERO };
+  });
+  const r = await tx((t) => priceCart(t, input, lines, branchId, new Date(), false));
+  const shares = allocate(r.cartTotalOff, r.afterLine);
+  const tax = input.items.reduce((sum, i, idx) => {
+    const p = byId.get(i.productId)!, lineTotal = money(r.afterLine[idx].minus(shares[idx]));
+    const rate = p.taxRate?.onReceipt ? p.taxRate.rate : ZERO;
+    return sum.plus(money(lineTotal.minus(lineTotal.div(D(1).plus(rate.div(100))))));
+  }, ZERO);
+  const list = lines.reduce((acc, l) => acc.plus(l.gross), ZERO);
+  return { list, discount: money(list.minus(r.total)), tax, total: r.total };
+}
+
 async function createSale(a: Auth, input: SaleInput, ip: string | null) {
   const branchId = requireBranch(a);
   if (input.clientId) {
@@ -153,27 +204,7 @@ async function createSale(a: Auth, input: SaleInput, ip: string | null) {
   const at = input.soldAt && input.soldAt < new Date() ? input.soldAt : new Date();
 
   return tx(async (t) => {
-    await applyPromotions(t, lines, branchId, at);
-    const afterLine = lines.map((l) => l.gross.minus(Prisma.Decimal.max(l.manual, l.promo)));
-    const subtotal = afterLine.reduce((s, v) => s.plus(v), ZERO);
-
-    let cartOff = ZERO;
-    if (input.cartDiscount) cartOff = input.cartDiscount.type === "PERCENT" ? money(subtotal.times(input.cartDiscount.value).div(100)) : money(input.cartDiscount.value);
-
-    let couponId: string | undefined, couponOff = ZERO;
-    if (input.couponCode) {
-      const c = await t.coupon.findUnique({ where: { code: input.couponCode.toUpperCase() } });
-      if (!c || !c.active || (c.startsAt && c.startsAt > at) || (c.endsAt && c.endsAt < at)) throw conflict("Coupon is not valid");
-      if (subtotal.lt(c.minSpend)) throw conflict(`Coupon needs a minimum spend of Rs. ${c.minSpend.toFixed(2)}`);
-      const where = { id: c.id, ...(c.usageLimit != null ? { used: { lt: c.usageLimit } } : {}) };
-      const { count } = await t.coupon.updateMany({ where, data: { used: { increment: 1 } } });
-      if (!count) throw conflict("Coupon has reached its usage limit");
-      couponId = c.id;
-      couponOff = c.type === "PERCENT" ? money(subtotal.times(c.value).div(100)) : c.value;
-      if (c.maxDiscount && couponOff.gt(c.maxDiscount)) couponOff = c.maxDiscount;
-    }
-    const cartTotalOff = Prisma.Decimal.min(subtotal, cartOff.plus(couponOff));
-    const total = money(subtotal.minus(cartTotalOff));
+    const { afterLine, subtotal, cartOff, couponId, cartTotalOff, total } = await priceCart(t, input, lines, branchId, at, true);
 
     // Staff-given discount as a share of list price (promotions and coupons don't count).
     const listTotal = lines.reduce((s, l) => s.plus(l.gross), ZERO);
@@ -431,6 +462,7 @@ export const salesRoutes: Route[] = [
     return paged(rows.map((s) => stripCost(auth, s)), total, p);
   }),
   route("POST", "/sales", { perm: "sales.make" }, async ({ auth, body, ip }) => stripCost(auth, await createSale(auth, await body(saleSchema), ip))),
+  route("POST", "/sales/quote", { perm: "sales.make" }, async ({ auth, body }) => quoteSale(auth, await body(quoteSchema))),
   route("POST", "/sales/sync", { perm: "sales.make" }, async ({ auth, body, ip }) => {
     // Offline queue replay: each sale stands alone, so one failure doesn't block the rest.
     const { sales } = await body(z.object({ sales: z.array(saleSchema.extend({ clientId: z.string().min(8).max(64) })).min(1).max(100) }));

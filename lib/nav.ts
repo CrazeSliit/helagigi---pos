@@ -13,7 +13,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
   ] },
   { group: "g.manage", items: [
     { key: "n.products", href: "/products", icon: Package },
-    { key: "n.inventory", href: "/inventory", icon: Boxes, badge: 9 },
+    { key: "n.inventory", href: "/inventory", icon: Boxes },
     { key: "n.purchasing", href: "/purchasing", icon: Truck },
     { key: "n.customers", href: "/customers", icon: Users },
     { key: "n.promotions", href: "/promotions", icon: Megaphone },

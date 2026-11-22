@@ -12,7 +12,7 @@ const zPin = z.string().regex(/^\d{4,6}$/, "PIN must be 4 to 6 digits");
 const userInclude = { role: true, branches: { include: { branch: { select: { id: true, name: true, code: true } } } } } as const;
 
 async function branchesFor(u: { allBranches: boolean; id: string }) {
-  return db.branch.findMany({ where: { active: true, ...(u.allBranches ? {} : { users: { some: { userId: u.id } } }) }, select: { id: true, name: true, code: true, address: true }, orderBy: { name: "asc" } });
+  return db.branch.findMany({ where: { active: true, ...(u.allBranches ? {} : { users: { some: { userId: u.id } } }) }, select: { id: true, name: true, code: true, address: true, phone: true }, orderBy: { name: "asc" } });
 }
 
 export const authRoutes: Route[] = [
@@ -83,12 +83,31 @@ export const authRoutes: Route[] = [
   }),
 
   route("POST", "/auth/branch", {}, async ({ auth, body, ip }) => {
-    const b = await body(z.object({ branchId: zId, terminalId: zId.optional() }));
+    const b = await body(z.object({ branchId: zId, terminalId: zId.optional(), remember: z.boolean().default(false) }));
     if (!canAccessBranch(auth, b.branchId)) throw forbidden("No access to this branch");
     if (b.terminalId && !(await db.terminal.findFirst({ where: { id: b.terminalId, branchId: b.branchId, active: true } }))) throw badRequest("Terminal is not in this branch");
     await db.session.update({ where: { id: auth.sessionId }, data: { branchId: b.branchId, terminalId: b.terminalId ?? null } });
     await audit(db, { userId: auth.userId, branchId: b.branchId, ip }, "auth.branch", "Branch", b.branchId);
-    return { branchId: b.branchId, terminalId: b.terminalId ?? null };
+    const res = NextResponse.json({ data: { branchId: b.branchId, terminalId: b.terminalId ?? null } }, { status: 201 });
+    if (b.remember) {
+      const d = await createDevice(auth.userId, b.branchId, b.terminalId ?? null);
+      res.cookies.set(DEVICE_COOKIE, d.token, cookieOptions(d.expiresAt));
+    }
+    return res;
+  }),
+
+  // Who can approve at this till. Names only, for the manager PIN prompt.
+  route("GET", "/auth/approvers", { perm: "sales.make" }, async ({ auth, query }) => {
+    const perm = query.get("perm") === "sales.void" ? "sales.void" : "sales.discount_any";
+    const users = await db.user.findMany({
+      where: {
+        active: true, pinHash: { not: null }, id: { not: auth.userId },
+        OR: [{ allBranches: true }, { branches: { some: { branchId: auth.branchId ?? "" } } }],
+        role: { OR: [{ name: "Owner" }, { permissions: { has: perm } }] },
+      },
+      select: { id: true, name: true, color: true, role: { select: { name: true } } }, orderBy: { name: "asc" },
+    });
+    return users.map((u) => ({ id: u.id, name: u.name, color: u.color, role: u.role.name }));
   }),
 
   route("POST", "/auth/lock", {}, async ({ auth }) => { await db.session.update({ where: { id: auth.sessionId }, data: { locked: true } }); return { locked: true }; }),

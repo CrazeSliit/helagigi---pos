@@ -1,5 +1,6 @@
 import { AppShell } from "@/components/shell";
+import { SessionGate } from "@/lib/session";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  return <AppShell>{children}</AppShell>;
+  return <SessionGate><AppShell>{children}</AppShell></SessionGate>;
 }

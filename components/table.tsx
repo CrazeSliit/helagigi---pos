@@ -8,11 +8,11 @@ import { Dropdown, MenuItem } from "./overlays";
 export type Col<T> = { key: string; label: string; render?: (r: T) => ReactNode; sort?: (r: T) => number | string; align?: "right" | "center"; className?: string };
 
 export function DataTable<T extends { id: string | number }>({
-  rows, cols, selectable, bulk, rowActions, onRow, loading, empty, pageSize = 10, total, selectedId,
+  rows, cols, selectable, bulk, rowActions, onRow, loading, empty, pageSize = 10, total, selectedId, footer,
 }: {
   rows: T[]; cols: Col<T>[]; selectable?: boolean; bulk?: { label: string; icon?: React.ComponentType<{ size?: number }>; danger?: boolean }[];
   rowActions?: { label: string; icon?: React.ComponentType<{ size?: number }>; danger?: boolean; onClick?: (r: T) => void }[];
-  onRow?: (r: T) => void; loading?: boolean; empty?: ReactNode; pageSize?: number; total?: number; selectedId?: string | number;
+  onRow?: (r: T) => void; loading?: boolean; empty?: ReactNode; pageSize?: number; total?: number; selectedId?: string | number; footer?: ReactNode;
 }) {
   const [sel, setSel] = useState<Set<string | number>>(new Set());
   const [sort, setSort] = useState<{ k: string; dir: 1 | -1 } | null>(null);
@@ -87,7 +87,7 @@ export function DataTable<T extends { id: string | number }>({
         </table>
         {!loading && rows.length === 0 && (empty ?? <EmptyState title="Nothing here yet" body="Try changing the filters or date range." />)}
       </div>
-      {rows.length > 0 && <Pagination total={total ?? rows.length} pages={Math.max(1, Math.ceil((total ?? rows.length) / pageSize))} />}
+      {rows.length > 0 && (footer ?? <Pagination total={total ?? rows.length} pages={Math.max(1, Math.ceil((total ?? rows.length) / pageSize))} />)}
     </div>
   );
 }

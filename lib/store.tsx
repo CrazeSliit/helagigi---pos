@@ -45,6 +45,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
   useEffect(() => { document.documentElement.lang = lang; }, [lang]);
+  useEffect(() => {
+    const update = () => setSync(navigator.onLine ? "synced" : "offline");
+    update();
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => { window.removeEventListener("online", update); window.removeEventListener("offline", update); };
+  }, []);
 
   const setTheme = (t: "light" | "dark") => { setThemeS(t); save("hd.theme", t); };
   const setLang = (l: Lang) => { setLangS(l); save("hd.lang", l); };

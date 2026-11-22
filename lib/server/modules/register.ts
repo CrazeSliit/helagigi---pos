@@ -8,11 +8,12 @@ import { branchFilter, canAccessBranch, requireBranch, zMoney, zPositiveMoney, z
 /** X/Z figures for a shift. Payments are net of change, and refunds are negative. */
 async function shiftSummary(t: Tx | typeof db, shiftId: string) {
   const s = await t.shift.findUniqueOrThrow({ where: { id: shiftId } });
-  const [byMethod, moves, sales, returns] = await Promise.all([
+  const [byMethod, moves, sales, returns, cashMovements] = await Promise.all([
     t.payment.groupBy({ by: ["method"], where: { shiftId }, _sum: { amount: true } }),
     t.cashMovement.groupBy({ by: ["type"], where: { shiftId }, _sum: { amount: true } }),
     t.sale.aggregate({ where: { shiftId, status: { not: "VOIDED" } }, _sum: { total: true, discount: true, tax: true }, _count: true }),
     t.saleReturn.aggregate({ where: { shiftId }, _sum: { total: true }, _count: true }),
+    t.cashMovement.findMany({ where: { shiftId }, orderBy: { createdAt: "desc" } }),
   ]);
   const cashSales = byMethod.find((m) => m.method === "CASH")?._sum.amount ?? ZERO;
   const cashIn = moves.find((m) => m.type === "CASH_IN")?._sum.amount ?? ZERO;
@@ -21,7 +22,7 @@ async function shiftSummary(t: Tx | typeof db, shiftId: string) {
     shift: s, payments: byMethod.map((m) => ({ method: m.method, amount: m._sum.amount ?? ZERO })),
     salesCount: sales._count, grossSales: sales._sum.total ?? ZERO, discounts: sales._sum.discount ?? ZERO, tax: sales._sum.tax ?? ZERO,
     returnsCount: returns._count, returnsTotal: returns._sum.total ?? ZERO,
-    openingFloat: s.openingFloat, cashSales, cashIn, cashOut,
+    openingFloat: s.openingFloat, cashSales, cashIn, cashOut, cashMovements,
     expectedCash: money(s.openingFloat.plus(cashSales).plus(cashIn).minus(cashOut)),
   };
 }

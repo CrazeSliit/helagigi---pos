@@ -3,34 +3,45 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  BadgePercent, ChevronRight, Clock, Grid3x3, LayoutDashboard, List, Lock, LogOut, Menu, PauseCircle, ScanBarcode, StickyNote,
-  Ticket, Trash2, User, UserPlus, Wallet, Star, Undo2, ArrowDownUp, Inbox, X,
+  BadgePercent, Clock, Grid3x3, LayoutDashboard, List, Lock, LogOut, Menu, PauseCircle, ScanBarcode, StickyNote,
+  Ticket, Trash2, User, UserPlus, Star, ArrowDownUp, Inbox, X,
 } from "lucide-react";
 import { Logo } from "@/components/brand";
 import { LangSwitch, SyncPill, ThemeToggle } from "@/components/shell";
 import { Avatar, Badge, Button } from "@/components/ui";
 import { Confirm, Dropdown, MenuItem, Modal, Toaster } from "@/components/overlays";
-import { CartLine, ProductCard, sampleReceipt, type Line, type ReceiptData } from "@/components/pos-kit";
+import { CartLine, ProductCard, type Line, type ReceiptData } from "@/components/pos-kit";
 import {
   CouponModal, CustomerModal, DiscountModal, HeldDrawer, LineEditModal, OverrideModal, PaymentModal, ReceiptModal, SaleComplete,
-  VariantModal, WeightModal, type Held, type PayMethod,
+  VariantModal, WeightModal, type Held, type PayLine, type PayMethod,
 } from "@/components/pos-modals";
-import { categories, customers, products, type Customer, type Product } from "@/lib/data";
-import { cn, rs } from "@/lib/format";
+import type { Customer, Product } from "@/lib/data";
+import { api, apiAll, ApiFail, errText, METHOD, newKey, toCustomer, toProduct, type ApiCustomer, type ApiProduct } from "@/lib/api";
+import { cn, ddmmyyyy, hhmm, rs } from "@/lib/format";
+import { branchOf, useSession } from "@/lib/session";
 import { useApp } from "@/lib/store";
 
-const seed = (): Line[] => [
-  { key: "a", p: products[0], qty: 2, price: 1150 },
-  { key: "b", p: products[1], qty: 1, price: 560 },
-  { key: "c", p: products[3], qty: 1, price: 1450, disc: 10 },
-  { key: "d", p: products[2], qty: 2, price: 420 },
-];
-
 type ModalKey = null | "pay" | "done" | "receipt" | "held" | "discount" | "coupon" | "customer" | "override" | "note" | "clear";
+type Quote = { list: number; discount: number; tax: number; total: number };
+type ApiSale = {
+  id: string; number: string; total: number; change: number; paid: number; subtotal: number; discount: number; tax: number; pointsEarned: number; soldAt: string;
+  cashier: { name: string }; customer: { name: string } | null; branch: { name: string };
+  items: { name: string; variantLabel: string | null; quantity: number; unitPrice: number }[]; payments: { method: string; amount: number }[];
+};
+type HeldLine = { productId: string; qty: number; disc?: number; variant?: string };
+type ApiHeld = { id: string; number: string; total: number; note: string | null; createdAt: string; customerId: string | null; customer: { id: string; name: string } | null; cart: HeldLine[] };
+type Cat = { id: string; code: string; name: string; nameSi: string | null; nameTa: string | null };
+const timeOf = (iso: string) => hhmm(new Date(iso));
 
 export default function POS() {
-  const { t, lang, toast, setSync } = useApp();
+  const { t, lang, toast } = useApp();
+  const { me } = useSession();
   const router = useRouter();
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Cat[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState("");
+  const [shiftOpenedAt, setShiftOpenedAt] = useState<number | null>(null);
   const [lines, setLines] = useState<Line[]>([]);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [cartDisc, setCartDisc] = useState<{ type: "%" | "Rs"; v: number } | null>(null);
@@ -43,54 +54,79 @@ export default function POS() {
   const [variantP, setVariantP] = useState<Product | null>(null);
   const [weightP, setWeightP] = useState<Product | null>(null);
   const [editLine, setEditLine] = useState<Line | null>(null);
-  const [lastSale, setLastSale] = useState({ change: 0, total: 0, method: "Cash", points: 0 });
+  const [lastSale, setLastSale] = useState({ change: 0, total: 0, method: "Cash", points: 0, invoice: "" });
+  const [doc, setDoc] = useState<ApiSale | null>(null);
   const [note, setNote] = useState("");
   const [flies, setFlies] = useState<{ id: number; x: number; y: number; fx: number; fy: number }[]>([]);
   const [bump, setBump] = useState(0);
-  const [pendingApproval, setPendingApproval] = useState<(() => void) | null>(null);
-  const [held, setHeld] = useState<Held[]>([
-    { id: "H-0412", customer: "Fathima Rizwan", items: 6, total: 4_280, time: "14:31", note: "Gone to ATM" },
-    { id: "H-0411", customer: "Walk-in Customer", items: 2, total: 980, time: "14:05" },
-  ]);
-  const [shiftStart] = useState(() => Date.now() - (6 * 3600 + 42 * 60) * 1000);
+  const [held, setHeld] = useState<(Held & { raw: ApiHeld })[]>([]);
+  const [quote, setQuote] = useState<{ key: string; q: Quote } | null>(null);
+  const [quoteErr, setQuoteErr] = useState("");
+  const [payBusy, setPayBusy] = useState(false);
+  const [payErr, setPayErr] = useState("");
+  const [pendingPay, setPendingPay] = useState<{ lines: PayLine[]; label: string } | null>(null);
   const [now, setNow] = useState(0);
+  const saleKey = useRef(newKey());
   const search = useRef<HTMLInputElement>(null);
   const cartRef = useRef<HTMLDivElement>(null);
 
-  // Demo states via ?state=… so every modal can be reviewed directly
+  const loadProducts = useCallback(async () => { setProducts((await apiAll<ApiProduct>("/products")).map(toProduct)); }, []);
+  const loadHeld = useCallback(async () => {
+    const rows = await api<ApiHeld[]>("/sales/held");
+    setHeld(rows.map((h) => ({ id: h.number, customer: h.customer?.name ?? "Walk-in Customer", items: h.cart.length, total: h.total, time: timeOf(h.createdAt), note: h.note ?? undefined, raw: h })));
+  }, []);
   useEffect(() => {
-    const s = new URLSearchParams(window.location.search).get("state");
-    if (!s) return;
-    if (s !== "empty") { setLines(seed()); setCustomer(customers[0]); }
-    const map: Record<string, () => void> = {
-      "pay-cash": () => { setPayInit("cash"); setModal("pay"); }, "pay-card": () => { setPayInit("card"); setModal("pay"); },
-      "pay-qr": () => { setPayInit("qr"); setModal("pay"); }, "pay-split": () => { setPayInit("split"); setModal("pay"); },
-      "pay-credit": () => { setPayInit("credit"); setModal("pay"); }, "pay-gift": () => { setPayInit("gift"); setModal("pay"); },
-      done: () => { setLastSale({ change: 1_120, total: 4_880, method: "Cash", points: 48 }); setModal("done"); },
-      receipt: () => setModal("receipt"), held: () => setModal("held"), discount: () => setModal("discount"), coupon: () => setModal("coupon"),
-      customer: () => setModal("customer"), override: () => setModal("override"), variant: () => setVariantP(products[7]), weight: () => setWeightP(products[13]),
-      edit: () => setEditLine(seed()[2]), clear: () => setModal("clear"), offline: () => setSync("offline"),
-    };
-    map[s]?.();
-  }, [setSync]);
+    (async () => {
+      try {
+        const shift = await api<{ shift: { openedAt: string } } | null>("/shifts/current");
+        if (!shift) return router.replace("/register/open");
+        setShiftOpenedAt(new Date(shift.shift.openedAt).getTime());
+        const [, cats] = await Promise.all([loadProducts(), apiAll<Cat>("/categories"), loadHeld()]);
+        setCategories(cats);
+      } catch (e) { setLoadErr(errText(e)); } finally { setLoading(false); }
+    })();
+  }, [loadProducts, loadHeld, router]);
 
   useEffect(() => { setNow(Date.now()); const i = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(i); }, []);
   useEffect(() => { search.current?.focus(); }, []);
 
-  const subtotal = lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc ?? 0) / 100), 0);
-  const lineSavings = lines.reduce((s, l) => s + l.qty * l.price * ((l.disc ?? 0) / 100), 0);
-  const cartOff = cartDisc ? (cartDisc.type === "%" ? (subtotal * cartDisc.v) / 100 : cartDisc.v) : 0;
-  const couponOff = coupon ? subtotal * 0.1 : 0;
-  const discount = Math.min(subtotal, cartOff + couponOff);
-  const total = Math.round((subtotal - discount) * 100) / 100;
-  const vat = total - total / 1.18;
-  const itemCount = lines.reduce((s, l) => s + (l.p.weighed ? 1 : l.qty), 0);
+  const items = useMemo(() => lines.map((l) => ({ productId: l.p.id, quantity: l.qty, ...(l.variant ? { variantLabel: l.variant } : {}), ...(l.disc ? { discountPct: l.disc } : {}) })), [lines]);
+  const cartDiscount = cartDisc ? { type: cartDisc.type === "%" ? "PERCENT" : "FIXED", value: cartDisc.v } : undefined;
+  const cartKey = JSON.stringify({ items, cartDiscount, coupon });
+  const quoteFresh = quote?.key === cartKey;
+
+  // The server prices every cart, so what the cashier sees is what will be charged.
+  useEffect(() => {
+    saleKey.current = newKey();
+    setQuoteErr("");
+    if (!items.length) { setQuote(null); return; }
+    let live = true;
+    const h = setTimeout(() => {
+      api<Quote>("/sales/quote", { body: { items, couponCode: coupon ?? undefined, cartDiscount } })
+        .then((r) => { if (live) setQuote({ key: cartKey, q: r }); })
+        .catch((e) => {
+          if (!live) return;
+          if (coupon && e instanceof ApiFail && e.status === 409) { setCoupon(null); toast({ tone: "warning", title: "Coupon removed", body: e.message }); }
+          else setQuoteErr(errText(e));
+        });
+    }, 180);
+    return () => { live = false; clearTimeout(h); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cartKey]);
+
+  const localList = lines.reduce((acc, l) => acc + l.qty * l.price, 0);
+  const shown = quote?.q;
+  const subtotal = shown?.list ?? localList;
+  const discountTotal = shown?.discount ?? 0;
+  const total = shown?.total ?? localList;
+  const vat = shown?.tax ?? 0;
+  const itemCount = lines.reduce((acc, l) => acc + (l.p.weighed ? 1 : l.qty), 0);
 
   const filtered = useMemo(() => {
     const list = cat === "fav" ? products.filter((p) => p.fav) : cat === "all" ? products : products.filter((p) => p.cat === cat);
     const s = q.trim().toLowerCase();
     return s ? list.filter((p) => p.name.toLowerCase().includes(s) || p.barcode.includes(s) || p.sku.toLowerCase().includes(s) || (p.si ?? "").includes(s)) : list;
-  }, [cat, q]);
+  }, [cat, q, products]);
 
   const fly = (el: HTMLElement) => {
     const a = el.getBoundingClientRect(); const b = cartRef.current?.getBoundingClientRect();
@@ -118,21 +154,24 @@ export default function POS() {
     addLine(p);
   };
 
-  const openPay = useCallback(() => { if (lines.length) { setPayInit("cash"); setModal("pay"); } }, [lines.length]);
-  const hold = useCallback(() => {
+  const clearCart = useCallback(() => { setLines([]); setCustomer(null); setCartDisc(null); setCoupon(null); setNote(""); }, []);
+  const openPay = useCallback(() => { if (lines.length && quoteFresh) { setPayErr(""); setPayInit("cash"); setModal("pay"); } }, [lines.length, quoteFresh]);
+  const hold = useCallback(async () => {
     if (!lines.length) return;
-    setHeld((h) => [{ id: `H-0${413 + h.length}`, customer: customer?.name ?? "Walk-in Customer", items: itemCount, total, time: new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Colombo", hour: "2-digit", minute: "2-digit" }), note }, ...h]);
-    setLines([]); setCustomer(null); setCartDisc(null); setCoupon(null); setNote("");
-    toast({ tone: "info", title: "Sale held", body: "Resume it any time from Held orders" });
-  }, [lines.length, customer, itemCount, total, note, toast]);
+    try {
+      await api("/sales/held", { body: { customerId: customer?.id, note: note || undefined, total, cart: lines.map((l) => ({ productId: l.p.id, qty: l.qty, disc: l.disc, variant: l.variant })) } });
+      clearCart(); await loadHeld();
+      toast({ tone: "info", title: "Sale held", body: "Resume it any time from Held orders" });
+    } catch (e) { toast({ tone: "error", title: "Couldn't hold this sale", body: errText(e) }); }
+  }, [lines, customer, total, note, toast, clearCart, loadHeld]);
 
-  // Keyboard shortcuts: F1 search, F2 customer, F4 hold, F8 discount, F12 pay, Esc cancel
+  // Keyboard shortcuts: F1 search, F2 customer, F4 hold, F8 discount, F12 pay
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const k = e.key;
       if (k === "F1") { e.preventDefault(); search.current?.focus(); }
       else if (k === "F2") { e.preventDefault(); setModal("customer"); }
-      else if (k === "F4") { e.preventDefault(); hold(); }
+      else if (k === "F4") { e.preventDefault(); void hold(); }
       else if (k === "F8") { e.preventDefault(); if (lines.length) setModal("discount"); }
       else if (k === "F12") { e.preventDefault(); openPay(); }
     };
@@ -140,24 +179,80 @@ export default function POS() {
     return () => window.removeEventListener("keydown", h);
   }, [hold, openPay, lines.length]);
 
-  const newSale = () => { setLines([]); setCustomer(null); setCartDisc(null); setCoupon(null); setNote(""); setModal(null); search.current?.focus(); };
-  const receiptData: ReceiptData = lines.length
-    ? { ...sampleReceipt, customer: customer?.name, lines: lines.map((l) => ({ name: l.p.name + (l.variant ? ` (${l.variant})` : "") + (l.p.weighed ? ` ${l.qty.toFixed(3)}kg` : ""), qty: l.p.weighed ? 1 : l.qty, price: l.p.weighed ? l.qty * l.price : l.price, disc: l.disc })), discount, method: lastSale.method, tendered: lastSale.total ? lastSale.total + lastSale.change : Math.ceil(total / 1000) * 1000, points: lastSale.points || (customer ? Math.floor(total / 100) : 0) }
-    : sampleReceipt;
-  const elapsed = now ? Math.floor((now - shiftStart) / 60000) : 402;
+  const newSale = () => { clearCart(); setDoc(null); setLastSale({ change: 0, total: 0, method: "Cash", points: 0, invoice: "" }); setModal(null); search.current?.focus(); };
+
+  const submitSale = useCallback(async (pay: { lines: PayLine[]; label: string }, approval?: { userId: string; pin: string }) => {
+    setPayBusy(true); setPayErr("");
+    try {
+      const sale = await api<ApiSale>("/sales", { body: { clientId: saleKey.current, customerId: customer?.id, couponCode: coupon ?? undefined, note: note || undefined, cartDiscount, items, payments: pay.lines, approval } });
+      setDoc(sale); setPendingPay(null);
+      setLastSale({ change: sale.change, total: sale.total, method: pay.label, points: sale.pointsEarned, invoice: sale.number });
+      setModal("done");
+      void loadProducts().catch(() => undefined);
+      return true;
+    } catch (e) {
+      if (e instanceof ApiFail && e.status === 403 && /approval/i.test(e.message)) {
+        if (approval) return false;
+        setPendingPay(pay); setModal("override");
+        return false;
+      }
+      setPendingPay(null); setPayErr(errText(e)); setModal("pay");
+      return false;
+    } finally { setPayBusy(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customer, coupon, note, cartKey, loadProducts]);
+  const approve = useCallback((approval: { userId: string; pin: string }) => (pendingPay ? submitSale(pendingPay, approval) : Promise.resolve(false)), [pendingPay, submitSale]);
+
+  const resumeHeld = async (h: Held & { raw: ApiHeld }) => {
+    if (lines.length) return toast({ tone: "warning", title: "Finish or clear the current sale first" });
+    const restored: Line[] = [];
+    for (const c of h.raw.cart) {
+      const p = products.find((x) => x.id === c.productId);
+      if (p) restored.push({ key: p.weighed ? p.id + newKey() : p.id + (c.variant ?? ""), p, qty: c.qty, price: p.price, disc: c.disc, variant: c.variant });
+    }
+    try {
+      const cust = h.raw.customerId ? toCustomer(await api<ApiCustomer>(`/customers/${h.raw.customerId}`)) : null;
+      await api(`/sales/held/${h.raw.id}`, { method: "DELETE" });
+      setLines(restored); setCustomer(cust); setNote(h.raw.note ?? ""); setModal(null); await loadHeld();
+      toast(restored.length === h.raw.cart.length ? { tone: "success", title: `Resumed ${h.id}` } : { tone: "warning", title: `Resumed ${h.id}`, body: "Some products are no longer available" });
+    } catch (e) { toast({ tone: "error", title: "Couldn't resume", body: errText(e) }); }
+  };
+  const deleteHeld = async (h: Held & { raw: ApiHeld }) => {
+    try { await api(`/sales/held/${h.raw.id}`, { method: "DELETE" }); await loadHeld(); }
+    catch (e) { toast({ tone: "error", title: "Couldn't delete", body: errText(e) }); }
+  };
+  const applyCoupon = async (code: string) => {
+    try {
+      await api("/sales/quote", { body: { items, couponCode: code, cartDiscount } });
+      setCoupon(code); setModal(null); toast({ tone: "success", title: `${code} applied` });
+      return null;
+    } catch (e) { return errText(e); }
+  };
+  const lockTerminal = async () => {
+    try { await api("/auth/lock", { body: {} }); window.location.assign("/lock"); }
+    catch (e) { toast({ tone: "error", title: "Couldn't lock", body: errText(e) }); }
+  };
+
+  const branch = branchOf(me);
+  const receiptData: ReceiptData | null = doc ? {
+    invoice: doc.number, date: ddmmyyyy(new Date(doc.soldAt)), time: hhmm(new Date(doc.soldAt)), cashier: doc.cashier.name, customer: doc.customer?.name, branch: doc.branch.name, address: branch?.address, phone: branch?.phone,
+    lines: doc.items.map((i) => ({ name: i.name + (i.variantLabel ? ` (${i.variantLabel})` : ""), qty: i.quantity, price: i.unitPrice })),
+    discount: doc.discount, subtotal: doc.subtotal, total: doc.total, tax: doc.tax, change: doc.change, method: doc.payments.map((p) => METHOD[p.method] ?? p.method).join(" + "), tendered: doc.paid, points: doc.pointsEarned,
+  } : null;
+  const elapsed = now && shiftOpenedAt ? Math.max(0, Math.floor((now - shiftOpenedAt) / 60000)) : 0;
   const si = lang !== "en";
 
   return (
     <div className={cn("flex h-screen flex-col overflow-hidden bg-bg", si && "pos-local")}>
       {/* ── Minimal top strip ── */}
       <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 sm:px-4">
-        <Link href="/dashboard" aria-label="Back to dashboard"><Logo className="w-[104px]" /></Link>
+        <Link href="/orders" aria-label="Back office"><Logo className="w-[104px]" /></Link>
         <span className="hidden h-6 w-px bg-line md:block" />
-        <span className="hidden text-cap text-fg2 md:block">Colombo 03 · T1</span>
+        <span className="hidden text-cap text-fg2 md:block">{branch?.name}</span>
         <div className="ml-auto flex items-center gap-2">
           <div className="hidden items-center gap-2 rounded-full bg-surface-2 py-1 pl-1 pr-3 sm:flex">
-            <Avatar name="Kasun Jayasuriya" size={28} color="#FF7A00" />
-            <span className="text-cap"><span className="font-semibold text-fg">Kasun J.</span> <span className="text-fg2">· {t("p.cashier")}</span></span>
+            <Avatar name={me.name} size={28} color={me.color} />
+            <span className="text-cap"><span className="font-semibold text-fg">{me.name}</span> <span className="text-fg2">· {me.role}</span></span>
           </div>
           <span className="hidden items-center gap-1 rounded-full bg-surface-2 px-3 py-1.5 text-cap font-semibold tnum text-fg lg:inline-flex" title="Shift timer"><Clock size={14} className="text-fg2" />{t("p.shift")} {Math.floor(elapsed / 60)}h {String(elapsed % 60).padStart(2, "0")}m</span>
           <SyncPill compact />
@@ -171,11 +266,9 @@ export default function POS() {
             {(close) => (
               <>
                 <div className="p-2 xl:hidden"><LangSwitch /></div>
-                <MenuItem icon={LayoutDashboard} onClick={() => router.push("/dashboard")}>Back office</MenuItem>
-                <MenuItem icon={Undo2} onClick={() => router.push("/returns/new")}>Process a return</MenuItem>
-                <MenuItem icon={ArrowDownUp} onClick={() => { close(); toast({ tone: "info", title: "Cash in / out", body: "Opens from Cash Register" }); router.push("/register"); }}>Cash in / out</MenuItem>
-                <MenuItem icon={Wallet} onClick={() => { close(); toast({ tone: "success", title: "Cash drawer opened" }); }}>Open cash drawer</MenuItem>
-                <MenuItem icon={Lock} onClick={() => router.push("/lock")}>Lock terminal</MenuItem>
+                <MenuItem icon={LayoutDashboard} onClick={() => router.push("/orders")}>Back office</MenuItem>
+                <MenuItem icon={ArrowDownUp} onClick={() => { close(); router.push("/register"); }}>Cash in / out</MenuItem>
+                <MenuItem icon={Lock} onClick={() => { close(); void lockTerminal(); }}>Lock terminal</MenuItem>
                 <MenuItem icon={LogOut} danger onClick={() => router.push("/register/close")}>Close shift</MenuItem>
               </>
             )}
@@ -200,7 +293,7 @@ export default function POS() {
             </div>
           </div>
           <div className="no-scrollbar flex gap-2 overflow-x-auto px-4 py-3" role="tablist" aria-label="Categories">
-            {[{ id: "fav", label: t("p.fav"), icon: true }, { id: "all", label: t("p.all") }, ...categories.map((c) => ({ id: c.id, label: c.name[lang === "si" ? 1 : lang === "ta" ? 2 : 0] }))].map((c) => (
+            {[{ id: "fav", label: t("p.fav"), icon: true }, { id: "all", label: t("p.all") }, ...categories.map((c) => ({ id: c.code, label: (lang === "si" ? c.nameSi : lang === "ta" ? c.nameTa : c.name) ?? c.name }))].map((c) => (
               <button key={c.id} role="tab" aria-selected={cat === c.id} onClick={() => setCat(c.id)}
                 className={cn("inline-flex h-12 shrink-0 items-center gap-1.5 rounded-full border px-5 text-sm font-semibold transition",
                   cat === c.id ? "border-orange-500 bg-orange-500 text-navy-900" : "border-line bg-surface text-fg hover:border-orange-500/50")}>
@@ -209,12 +302,12 @@ export default function POS() {
             ))}
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-            {filtered.length ? (
+            {loadErr ? <p role="alert" className="py-20 text-center font-semibold text-danger">{loadErr}</p> : loading ? <p className="py-20 text-center text-sm text-fg2" role="status">Loading products…</p> : filtered.length ? (
               <div className={cn(view === "grid" ? "grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] gap-3" : "grid gap-2 xl:grid-cols-2")}>
                 {filtered.map((p) => <ProductCard key={p.id} p={p} lang={lang} view={view} onAdd={(pp, el) => onProduct(pp, el)} />)}
               </div>
             ) : (
-              <div className="py-20 text-center text-fg2"><ScanBarcode size={40} className="mx-auto mb-3" /><p className="font-semibold text-fg">No product matches “{q}”</p><p className="text-sm">Check the barcode or try another name.</p></div>
+              <div className="py-20 text-center text-fg2"><ScanBarcode size={40} className="mx-auto mb-3" /><p className="font-semibold text-fg">{q ? `No product matches “${q}”` : "No products here"}</p><p className="text-sm">Check the barcode or try another name.</p></div>
             )}
           </div>
         </section>
@@ -268,9 +361,9 @@ export default function POS() {
           {/* Summary */}
           <div className="shrink-0 border-t border-line px-4 pt-3">
             <dl className="space-y-1.5 text-sm">
-              <div className="flex justify-between"><dt className="text-fg2">{t("p.subtotal")}</dt><dd className="font-semibold tnum">{rs(subtotal + lineSavings)}</dd></div>
-              {(discount > 0 || lineSavings > 0) && (
-                <div className="flex justify-between"><dt className="flex items-center gap-1.5 text-fg2">{t("p.discount")}{coupon && <Badge tone="orange" className="h-5 text-[11px]">{coupon}</Badge>}{cartDisc && <Badge tone="orange" className="h-5 text-[11px]">{cartDisc.type === "%" ? `${cartDisc.v}%` : "Fixed"}</Badge>}</dt><dd className="font-semibold text-orange-600 tnum dark:text-orange-500">− {rs(discount + lineSavings)}</dd></div>
+              <div className="flex justify-between"><dt className="text-fg2">{t("p.subtotal")}</dt><dd className="font-semibold tnum">{rs(subtotal)}</dd></div>
+              {discountTotal > 0 && (
+                <div className="flex justify-between"><dt className="flex items-center gap-1.5 text-fg2">{t("p.discount")}{coupon && <Badge tone="orange" className="h-5 text-[11px]">{coupon}</Badge>}{cartDisc && <Badge tone="orange" className="h-5 text-[11px]">{cartDisc.type === "%" ? `${cartDisc.v}%` : "Fixed"}</Badge>}</dt><dd className="font-semibold text-orange-600 tnum dark:text-orange-500">− {rs(discountTotal)}</dd></div>
               )}
               <div className="flex justify-between"><dt className="text-fg2">{t("p.tax")}</dt><dd className="tnum text-fg2">{rs(vat)}</dd></div>
               <div className="flex justify-between"><dt className="text-fg2">{t("p.items")}</dt><dd className="tnum text-fg2">{itemCount}</dd></div>
@@ -282,7 +375,7 @@ export default function POS() {
           </div>
           <div className="grid shrink-0 grid-cols-5 gap-2 px-4 py-3">
             {[
-              { l: t("p.hold"), i: PauseCircle, k: "F4", on: hold },
+              { l: t("p.hold"), i: PauseCircle, k: "F4", on: () => void hold() },
               { l: t("p.discount"), i: BadgePercent, k: "F8", on: () => setModal("discount"), dot: !!cartDisc },
               { l: t("p.coupon"), i: Ticket, k: "", on: () => setModal("coupon"), dot: !!coupon },
               { l: t("p.note"), i: StickyNote, k: "", on: () => setModal("note"), dot: !!note },
@@ -298,8 +391,9 @@ export default function POS() {
             ))}
           </div>
           <div className="shrink-0 px-4 pb-4 safe-area">
-            <Button variant="primary" size="pos" className="w-full text-[20px]" disabled={!lines.length} onClick={openPay} kbd="F12">
-              {t("p.charge")} {rs(total)}
+            {quoteErr && <p role="alert" className="mb-2 text-sm font-medium text-danger">{quoteErr}</p>}
+            <Button variant="primary" size="pos" className="w-full text-[20px]" disabled={!lines.length || !quoteFresh} onClick={openPay} kbd="F12">
+              {lines.length && !quoteFresh ? "Calculating…" : `${t("p.charge")} ${rs(total)}`}
             </Button>
           </div>
         </aside>
@@ -311,29 +405,25 @@ export default function POS() {
           style={{ left: f.x, top: f.y, ["--fx" as string]: `${f.fx}px`, ["--fy" as string]: `${f.fy}px` }}>+1</span>
       ))}
 
-      <PaymentModal open={modal === "pay"} onClose={() => setModal(null)} total={total} customer={customer} initial={payInit}
-        onComplete={(m, tendered) => { setLastSale({ change: Math.max(0, tendered - total), total, method: m, points: customer ? Math.floor(total / 100) : 0 }); setModal("done"); }} />
+      <PaymentModal open={modal === "pay"} onClose={() => setModal(null)} total={total} customer={customer} initial={payInit} busy={payBusy} error={payErr} onComplete={(l, label) => void submitSale({ lines: l, label })} />
       <SaleComplete open={modal === "done"} {...lastSale} onNew={newSale} onReceipt={() => setModal("receipt")} />
-      <ReceiptModal open={modal === "receipt"} onClose={() => setModal(lastSale.total ? "done" : null)} data={receiptData} />
+      <ReceiptModal open={modal === "receipt"} onClose={() => setModal("done")} data={receiptData} />
       <HeldDrawer open={modal === "held"} onClose={() => setModal(null)} held={held}
-        onResume={(h) => { setHeld((x) => x.filter((y) => y.id !== h.id)); setLines(seed().slice(0, 2)); setCustomer(customers.find((c) => c.name === h.customer) ?? null); setModal(null); toast({ tone: "success", title: `Resumed ${h.id}` }); }}
-        onDelete={(h) => setHeld((x) => x.filter((y) => y.id !== h.id))} />
-      <DiscountModal open={modal === "discount"} onClose={() => setModal(null)} subtotal={subtotal || 4880}
-        onApply={(type, v) => { setCartDisc({ type, v }); setModal(null); toast({ tone: "success", title: "Discount applied" }); }}
-        onNeedApproval={(after) => { setPendingApproval(() => after); setModal("override"); }} />
-      <OverrideModal open={modal === "override"} onClose={() => setModal(pendingApproval ? "discount" : null)}
-        onApproved={() => { const f = pendingApproval; setPendingApproval(null); setModal(null); if (f) f(); else toast({ tone: "success", title: "Approved by Dilani F." }); }} />
-      <CouponModal open={modal === "coupon"} onClose={() => setModal(null)} onApply={(c) => { setCoupon(c); setModal(null); toast({ tone: "success", title: `${c} applied`, body: "10% off this sale" }); }} />
+        onResume={(h) => void resumeHeld(h as Held & { raw: ApiHeld })} onDelete={(h) => void deleteHeld(h as Held & { raw: ApiHeld })} />
+      <DiscountModal open={modal === "discount"} onClose={() => setModal(null)} subtotal={subtotal}
+        onApply={(type, v) => { setCartDisc({ type, v }); setModal(null); toast({ tone: "success", title: "Discount applied" }); }} />
+      <OverrideModal open={modal === "override"} onClose={() => { setPendingPay(null); setModal("pay"); }} onSubmit={approve} />
+      <CouponModal open={modal === "coupon"} onClose={() => setModal(null)} onApply={applyCoupon} />
       <CustomerModal open={modal === "customer"} onClose={() => setModal(null)} onPick={(c) => { setCustomer(c); setModal(null); }} />
       <VariantModal p={variantP} onClose={() => setVariantP(null)} onAdd={(p, v, price) => { addLine(p, { variant: v, price }); setVariantP(null); }} />
       <WeightModal p={weightP} onClose={() => setWeightP(null)} onAdd={(p, kg) => { addLine(p, { qty: kg }); setWeightP(null); }} />
-      <LineEditModal line={editLine} onClose={() => setEditLine(null)} onLocked={() => setModal("override")}
+      <LineEditModal line={editLine} onClose={() => setEditLine(null)}
         onSave={(l) => { setLines((ls) => ls.map((x) => (x.key === l.key ? l : x))); setEditLine(null); }} />
       <Modal open={modal === "note"} onClose={() => setModal(null)} title="Order note" size="s"
         footer={<><Button size="l" onClick={() => setModal(null)}>Cancel</Button><Button size="l" variant="primary" onClick={() => setModal(null)}>Save note</Button></>}>
         <textarea autoFocus value={note} onChange={(e) => setNote(e.target.value)} className="field min-h-[120px] py-3" placeholder="e.g. Deliver to No. 45, Flower Road after 6 pm" />
       </Modal>
-      <Confirm open={modal === "clear"} onClose={() => setModal(null)} onConfirm={newSale} title="Clear this sale?" body={`All ${lines.length} lines (${rs(total)}) will be removed. This can't be undone.`} confirmLabel="Clear sale" />
+      <Confirm open={modal === "clear"} onClose={() => setModal(null)} onConfirm={() => { clearCart(); setModal(null); search.current?.focus(); }} title="Clear this sale?" body={`All ${lines.length} lines (${rs(total)}) will be removed. This can't be undone.`} confirmLabel="Clear sale" />
       <Toaster position="bottom" />
     </div>
   );

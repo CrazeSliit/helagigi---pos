@@ -1,7 +1,6 @@
 "use client";
 import { useState, type ReactNode } from "react";
 import { Delete, Layers, Minus, Plus, Scale, Trash2, Pencil } from "lucide-react";
-import { QRCodeSVG } from "qrcode.react";
 import { cn, rs } from "@/lib/format";
 import { categories, stockState, type Product } from "@/lib/data";
 import { translate, type Lang } from "@/lib/i18n";
@@ -78,7 +77,7 @@ export function StockBadge({ p, lang = "en" }: { p: Product; lang?: Lang }) {
   return (
     <span className={cn("inline-flex h-5 items-center gap-1 rounded-full px-2 text-[11px] font-semibold", m[0])}>
       <span className={cn("h-1.5 w-1.5 rounded-full", s === "in" ? "bg-success" : s === "low" ? "bg-warning" : "bg-danger")} />
-      {translate(lang, m[1])}{s !== "out" && <span className="tnum opacity-80">· {p.stock}{p.unit === "kg" ? "kg" : ""}</span>}
+      {translate(lang, m[1])}{s !== "out" && p.stock < 999999 && <span className="tnum opacity-80">· {p.stock}{p.unit === "kg" ? "kg" : ""}</span>}
     </span>
   );
 }
@@ -166,10 +165,12 @@ export type ReceiptData = {
   invoice: string; date: string; time: string; cashier: string; customer?: string; branch: string;
   lines: { name: string; qty: number; price: number; disc?: number }[];
   discount: number; method: string; tendered: number; points?: number;
+  /** Server figures. When present the receipt prints these instead of recalculating. */
+  subtotal?: number; total?: number; tax?: number; change?: number; address?: string | null; phone?: string | null;
 };
 export function Receipt({ d, width = 80, lang = "en", className }: { d: ReceiptData; width?: 58 | 80; lang?: Lang; className?: string }) {
-  const total = d.lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc ?? 0) / 100), 0) - d.discount;
-  const vat = total - total / 1.18;
+  const total = d.total ?? d.lines.reduce((s, l) => s + l.qty * l.price * (1 - (l.disc ?? 0) / 100), 0) - d.discount;
+  const vat = d.tax ?? total - total / 1.18;
   const px = width === 80 ? 302 : 219;
   const Row = ({ a, b, bold }: { a: ReactNode; b: ReactNode; bold?: boolean }) => <div className={cn("flex justify-between gap-2", bold && "font-bold")}><span>{a}</span><span className="tnum">{b}</span></div>;
   const si = lang === "si";
@@ -179,8 +180,8 @@ export function Receipt({ d, width = 80, lang = "en", className }: { d: ReceiptD
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/brand/wordmark.png" alt="HeladiGi" className="mx-auto mb-2 w-[60%]" />
         <p className="text-center font-bold">HeladiGi Mart — {d.branch}</p>
-        <p className="text-center">No. 214, Galle Road, Colombo 03</p>
-        <p className="text-center">Tel: +94 11 257 4410</p>
+        <p className="text-center">{d.address ?? "No. 214, Galle Road, Colombo 03"}</p>
+        <p className="text-center">Tel: {d.phone ?? "+94 11 257 4410"}</p>
         <p className="text-center">VAT Reg: 114567890-7000</p>
         <div className="my-2 border-t border-dashed border-black" />
         <Row a={si ? "ඉන්වොයිසිය" : "Invoice"} b={d.invoice} />
@@ -195,22 +196,18 @@ export function Receipt({ d, width = 80, lang = "en", className }: { d: ReceiptD
           </div>
         ))}
         <div className="my-2 border-t border-dashed border-black" />
-        <Row a={si ? "උප එකතුව" : "Subtotal"} b={rs(total + d.discount, { prefix: false })} />
+        <Row a={si ? "උප එකතුව" : "Subtotal"} b={rs(d.subtotal ?? total + d.discount, { prefix: false })} />
         {d.discount > 0 && <Row a={si ? "වට්ටම" : "Discount"} b={`-${rs(d.discount, { prefix: false })}`} />}
-        <Row a={si ? "වැට් 18% (ඇතුළත්)" : "VAT 18% (incl.)"} b={rs(vat, { prefix: false })} />
+        <Row a={si ? "වැට් (ඇතුළත්)" : "VAT (incl.)"} b={rs(vat, { prefix: false })} />
         <div className="my-1 border-t border-black" />
         <div className="flex justify-between text-[14px] font-bold"><span>{si ? "මුළු මුදල" : "TOTAL"}</span><span className="tnum">{rs(total)}</span></div>
         <div className="my-1 border-t border-black" />
         <Row a={d.method} b={rs(d.tendered, { prefix: false })} />
-        <Row a={si ? "ඉතිරි මුදල" : "Change"} b={rs(Math.max(0, d.tendered - total), { prefix: false })} bold />
+        <Row a={si ? "ඉතිරි මුදල" : "Change"} b={rs(d.change ?? Math.max(0, d.tendered - total), { prefix: false })} bold />
         {d.points ? <><div className="my-2 border-t border-dashed border-black" /><Row a={si ? "උපයාගත් ලකුණු" : "Points earned"} b={`+${d.points}`} /></> : null}
         <div className="my-2 border-t border-dashed border-black" />
         <p className="text-center font-bold">Thank you, come again!</p>
         <p className="text-center font-bold" style={{ fontFamily: "'Noto Sans Sinhala', sans-serif" }}>ස්තූතියි, නැවත එන්න!</p>
-        <div className="mt-3 flex flex-col items-center gap-1">
-          <QRCodeSVG value={`https://heladigi.lk/r/${d.invoice}`} size={width === 80 ? 88 : 72} />
-          <p>Scan for your e-receipt</p>
-        </div>
         <p className="mt-2 text-center text-[10px]">Exchanges within 7 days with receipt · Powered by HeladiGi POS</p>
       </div>
     </div>
